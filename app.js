@@ -9,7 +9,7 @@ const bodyParser = require('body-parser') // Import body-parser for handling dif
 
 // Global constants
 const DATA_DIR = path.join(__dirname, 'data')
-const PORT = 4000
+const PORT = process.env.PORT || 4000
 
 // Ensure data directory exists
 async function ensureDataDir() {
