@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>View Webhook Logs</title>
+	<link rel="stylesheet" href="style.css">
+	<script src="jquery-3.7.1.min.js"></script>
+</head>
+<body>
+	<a href="/" id="backToIndex">Back to index</a>
+	<div id="deleteControls">
+		<button id="deleteSelectedLogs" disabled>Delete Selected Logs</button>
+		<button id="deleteAllLogs">Delete All Logs</button>
+	</div>
+	<h1>Webhook Logs for URL: <span id="guid"></span></h1>
+	<div id="logList"></div>
+
+	<script>
+		const guid = new URLSearchParams(window.location.search).get('guid')
+		$('#guid').text(guid)
+
+		const logList = $('#logList')
+
+		// Function to fetch and render logs
+		function fetchLogs() {
+			$.get(`/logs/${guid}`, function(logs) {
+				logList.empty()
+
+				// Sort logs in descending order by logNumber
+				logs.sort((a, b) => b.logNumber - a.logNumber)
+
+				logs.forEach(log => {
+					const listItem = $(`
+						<div class="log-entry">
+							<div class="log-controls">
+								<input type="checkbox" class="log-checkbox" data-log-number="${log.logNumber}">
+								<span class="delete-log" data-log-number="${log.logNumber}">❌</span>
+							</div>
+							<p>[#${log.logNumber}] [${log.timestamp}] ${log.method} ${log.url}</p>
+							<pre>Headers: ${JSON.stringify(log.headers, null, 2)}</pre>
+							<pre>Body: ${JSON.stringify(log.body, null, 2)}</pre>
+						</div>
+					`)
+					logList.append(listItem)
+				})
+			})
+		}
+
+		// Initial fetch
+		fetchLogs()
+
+		// Delete individual log
+		$(document).on('click', '.delete-log', function() {
+			const logNumber = $(this).data('log-number')
+			if (confirm(`Are you sure you want to delete log #${logNumber}?`)) {
+				$.ajax({
+					url: `/logs/${guid}/${logNumber}`,
+					type: 'DELETE',
+					success: function() {
+						fetchLogs()
+					},
+					error: function() {
+						alert('Error deleting log')
+					}
+				})
+			}
+		})
+
+		// Delete selected logs
+		$('#deleteSelectedLogs').on('click', function() {
+			const selectedLogs = $('.log-checkbox:checked').map(function() {
+				return $(this).data('log-number')
+			}).get()
+			
+			if (selectedLogs.length > 0 && confirm(`Are you sure you want to delete the selected logs?`)) {
+				$.ajax({
+					url: `/logs/${guid}`,
+					type: 'DELETE',
+					contentType: 'application/json',
+					data: JSON.stringify({ logs: selectedLogs }),
+					success: function() {
+						fetchLogs()
+						$('#deleteSelectedLogs').prop('disabled', true).removeClass('fixed')
+					},
+					error: function() {
+						alert('Error deleting selected logs')
+					}
+				})
+			}
+		})
+
+		// Enable/disable delete selected button and adjust button position
+		$(document).on('change', '.log-checkbox', function() {
+			const anyChecked = $('.log-checkbox:checked').length > 0
+			$('#deleteSelectedLogs').prop('disabled', !anyChecked)
+			if (anyChecked) {
+				$('#deleteSelectedLogs').addClass('fixed')
+			} else {
+				$('#deleteSelectedLogs').removeClass('fixed')
+			}
+		})
+
+		// Delete all logs
+		$('#deleteAllLogs').on('click', function() {
+			if (confirm(`Are you sure you want to delete all logs for this URL?`)) {
+				$.ajax({
+					url: `/logs/${guid}`,
+					type: 'DELETE',
+					success: function() {
+						fetchLogs()
+					},
+					error: function() {
+						alert('Error deleting all logs')
+					}
+				})
+			}
+		})
+
+		// Stream new logs via SSE
+		const eventSource = new EventSource(`/logs-stream/${guid}`)
+		eventSource.onmessage = (event) => {
+			const log = JSON.parse(event.data)
+			const listItem = $(`
+				<div class="log-entry new-log">
+					<div class="log-controls">
+						<input type="checkbox" class="log-checkbox" data-log-number="${log.logNumber}">
+						<span class="delete-log" data-log-number="${log.logNumber}">❌</span>
+					</div>
+					<p>[#${log.logNumber}] [${log.timestamp}] ${log.method} ${log.url}</p>
+					<pre>Headers: ${JSON.stringify(log.headers, null, 2)}</pre>
+					<pre>Body: ${JSON.stringify(log.body, null, 2)}</pre>
+				</div>
+			`)
+			logList.prepend(listItem)
+
+			// Remove highlight effect after fade
+			listItem.animate({ backgroundColor: '#fff' }, 2000, function() {
+				listItem.removeClass('new-log')
+			})
+		}
+	</script>
+</body>
+</html>

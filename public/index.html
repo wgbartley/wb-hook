@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Webhook Manager</title>
+	<link rel="stylesheet" href="style.css">
+	<script src="jquery-3.7.1.min.js"></script>
+</head>
+<body>
+	<h1>Webhook Manager</h1>
+	<button id="createBtn">Create New URL</button>
+	<div id="newUrlContainer"></div>
+	<h2>Available URLs</h2>
+	<table id="urlTable">
+		<thead>
+			<tr>
+				<th>&nbsp;</th>
+				<th>&nbsp;</th>
+				<th>GUID</th>
+				<th>Created Time</th>
+				<th>Modified Time</th>
+			</tr>
+		</thead>
+		<tbody id="urlList"></tbody>
+	</table>
+	<button id="viewBtn" disabled>View Selected URL</button>
+	<button id="deleteBtn" disabled>Delete Selected URL</button>
+
+	<script>
+		// Enable buttons if a URL is selected
+		function enableButtons() {
+			$('#viewBtn, #deleteBtn').prop('disabled', !$('input[name="url"]:checked').length)
+		}
+
+		// Fetch all GUIDs and populate the list
+		async function fetchUrls() {
+			const response = await $.get('/get-urls')
+			const urlList = $('#urlList')
+			urlList.empty()
+
+			response.forEach(urlData => {
+				const { guid, created, modified } = urlData
+				const fullUrl = `${location.origin}/${guid}`
+				const row = $(`
+					<tr>
+						<td><input type="radio" name="url" value="${guid}"></td>
+						<td><span class="copy-emoji" data-copy="${fullUrl}">📋</span></td>
+						<td>${guid}</td>
+						<td>${new Date(created).toLocaleString()}</td>
+						<td>${new Date(modified).toLocaleString()}</td>
+					</tr>
+				`)
+
+				// Select radio button on row click
+				row.on('click', function() {
+					$(this).find('input[type="radio"]').prop('checked', true)
+					enableButtons()
+				})
+
+				// Copy URL to clipboard
+				row.find('.copy-emoji').on('click', function(e) {
+					e.stopPropagation()
+					const copyText = $(this).data('copy')
+					navigator.clipboard.writeText(copyText).then(() => {
+						alert('Copied to clipboard!')
+					})
+				})
+
+				urlList.append(row)
+			})
+
+			enableButtons()
+		}
+
+		// Create new GUID
+		$('#createBtn').on('click', async function() {
+			const data = await $.post('/create-url')
+			const fullUrl = `${location.origin}/${data.guid}`
+			$('#newUrlContainer').html(`
+				<label>New URL: <a href="${fullUrl}" target="_blank">${fullUrl}</a></label>
+				<span class="copy-emoji" id="copyNewUrl" data-copy="${fullUrl}">📋</span>
+			`)
+			$('#copyNewUrl').on('click', function() {
+				const copyText = $(this).data('copy')
+				navigator.clipboard.writeText(copyText).then(() => {
+					alert('Copied to clipboard!')
+				})
+			})
+			fetchUrls() // Refresh list after creation
+		})
+
+		// View selected GUID
+		$('#viewBtn').on('click', function() {
+			const selectedUrl = $('input[name="url"]:checked').val()
+			if (selectedUrl) {
+				window.location.href = `/view?guid=${selectedUrl}`
+			} else {
+				alert('Please select a URL to view.')
+			}
+		})
+
+		// Delete selected GUID
+		$('#deleteBtn').on('click', async function() {
+			const selectedUrl = $('input[name="url"]:checked').val()
+			if (selectedUrl) {
+				await $.ajax({
+					url: `/delete-url/${selectedUrl}`,
+					type: 'DELETE'
+				})
+				fetchUrls() // Refresh list after deletion
+			} else {
+				alert('Please select a URL to delete.')
+			}
+		})
+
+		// Initial fetch
+		fetchUrls()
+	</script>
+</body>
+</html>
