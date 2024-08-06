@@ -23,7 +23,7 @@
 
 	<script>
 		const guid = new URLSearchParams(window.location.search).get('guid')
-		const baseUrl = `${location.origin}/view?guid=${guid}`
+		const baseUrl = `${location.origin}/${guid}`
 		const logList = $('#logList')
 
 		// Function to fetch and render logs
