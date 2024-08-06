@@ -32,15 +32,27 @@ async function logRequest(guid, requestData) {
 	let logData = []
 	let nextLogNumber = 1
 
+	// Check if the log file exists for the given GUID
+	try {
+		await fs.access(filePath)
+	} catch (err) {
+		if (err.code === 'ENOENT') {
+			// File does not exist, return 404
+			return { error: 'File not found', status: 404 }
+		} else {
+			console.error(`Error accessing log file for GUID ${guid}:`, err)
+			return { error: 'Error accessing log file', status: 500 }
+		}
+	}
+
+	// Proceed to read and log request data if the file exists
 	try {
 		const rawData = await fs.readFile(filePath, 'utf8')
 		logData = JSON.parse(rawData)
 		nextLogNumber = logData.length + 1
 	} catch (err) {
-		if (err.code !== 'ENOENT') {
-			console.error(`Error reading log file for GUID ${guid}:`, err)
-		}
-		// If the file doesn't exist, we start with an empty array
+		console.error(`Error reading log file for GUID ${guid}:`, err)
+		return { error: 'Error reading log file', status: 500 }
 	}
 
 	requestData.logNumber = nextLogNumber
@@ -50,15 +62,16 @@ async function logRequest(guid, requestData) {
 		await fs.writeFile(filePath, JSON.stringify(logData, null, 2))
 	} catch (err) {
 		console.error(`Error writing log file for GUID ${guid}:`, err)
-		return
+		return { error: 'Error writing log file', status: 500 }
 	}
 
 	// Notify SSE listeners
 	if (sseClients[guid]) {
 		const message = JSON.stringify(requestData)
 		sseClients[guid].forEach(res => res.write(`data: ${message}\n\n`))
-		console.log(`SSE message sent for GUID ${guid}`)
 	}
+
+	return { status: 200 }
 }
 
 // Set up the Express app and routes
@@ -78,25 +91,25 @@ morgan.token('customDate', () => moment().format('YYYY-MM-DD HH:mm:ss'))
 
 // Middlewares
 app.use(
-    morgan((tokens, req, res) => {
-        const status = tokens.status(req, res)
-        const color = status >= 500 ? 31 // red
-            : status >= 400 ? 33 // yellow
-            : status >= 300 ? 36 // cyan
-            : status >= 200 ? 32 // green
-            : 0 // no color
+	morgan((tokens, req, res) => {
+		const status = tokens.status(req, res)
+		const color = status >= 500 ? 31 // red
+			: status >= 400 ? 33 // yellow
+			: status >= 300 ? 36 // cyan
+			: status >= 200 ? 32 // green
+			: 0 // no color
 
-        const coloredStatus = `\x1b[${color}m${status}\x1b[0m`
+		const coloredStatus = `\x1b[${color}m${status}\x1b[0m`
 
-        return [
-            `[${tokens.customDate(req, res)}]`, // Custom timestamp
-            tokens.method(req, res),
-            tokens.url(req, res),
-            coloredStatus, // Colored status code
-            `${tokens['response-time'](req, res)} ms`,
-            `- ${tokens.res(req, res, 'content-length') || '0'} bytes`
-        ].join(' ')
-    })
+		return [
+			`[${tokens.customDate(req, res)}]`, // Custom timestamp
+			tokens.method(req, res),
+			tokens.url(req, res),
+			coloredStatus, // Colored status code
+			`${tokens['response-time'](req, res)} ms`,
+			`- ${tokens.res(req, res, 'content-length') || '0'} bytes`
+		].join(' ')
+	})
 )
 
 // Serve static HTML files
@@ -218,12 +231,9 @@ app.get('/logs-stream/:guid', (req, res) => {
 	if (!sseClients[guid]) sseClients[guid] = []
 	sseClients[guid].push(res)
 
-	console.log(`Client connected for SSE, GUID: ${guid}, Clients: ${sseClients[guid].length}`)
-
 	// Remove the response object when the client closes the connection
 	req.on('close', () => {
 		sseClients[guid] = sseClients[guid].filter(client => client !== res)
-		console.log(`Client disconnected from SSE, GUID: ${guid}, Remaining Clients: ${sseClients[guid].length}`)
 	})
 })
 
@@ -239,12 +249,11 @@ app.all('/:guid/:subPath*?', async (req, res) => {
 		timestamp: new Date().toISOString()
 	}
 
-	try {
-		await logRequest(guid, requestData)
-		res.sendStatus(200)
-	} catch (err) {
-		console.error(`Error logging request for GUID ${guid}:`, err)
-		res.status(500).send('Error logging request')
+	const result = await logRequest(guid, requestData)
+	if (result.error) {
+		res.status(result.status).send(result.error)
+	} else {
+		res.sendStatus(result.status)
 	}
 })
 
