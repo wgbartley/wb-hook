@@ -8,29 +8,45 @@
 	<script src="jquery-3.7.1.min.js"></script>
 </head>
 <body>
-	<a href="/" id="backToIndex">Back to index</a>
 	<div id="deleteControls">
+		<button id="backToIndex">Back to Index</button>
 		<button id="deleteSelectedLogs" disabled>Delete Selected Logs</button>
 		<button id="deleteAllLogs">Delete All Logs</button>
 	</div>
-	<h1>Webhook Logs for URL: <span id="guid"></span></h1>
+	<div id="header">
+		<h1>Webhook Logs for URL: <span id="urlName"></span></h1>
+	</div>
+	<div id="guidContainer">
+		<span id="guid"></span> <span class="copy-emoji" data-copy="">📋</span>
+	</div>
 	<div id="logList"></div>
 
 	<script>
 		const guid = new URLSearchParams(window.location.search).get('guid')
-		$('#guid').text(guid)
-
+		const baseUrl = `${location.origin}/view?guid=${guid}`
 		const logList = $('#logList')
 
 		// Function to fetch and render logs
 		function fetchLogs() {
-			$.get(`/logs/${guid}`, function(logs) {
+			$.get(`/logs/${guid}`, function(data) {
 				logList.empty()
 
-				// Sort logs in descending order by logNumber
-				logs.sort((a, b) => b.logNumber - a.logNumber)
+				// Set the name if available or use guid
+				const { name, requests } = data
+				if (name === false) {
+					$('#urlName').text(guid)
+					$('#guidContainer').hide() // Hide guidContainer if name is false
+				} else {
+					$('#urlName').text(name)
+					$('#guid').text(guid)
+					$('.copy-emoji').attr('data-copy', baseUrl)
+					$('#guidContainer').show()
+				}
 
-				logs.forEach(log => {
+				// Sort logs in descending order by logNumber
+				requests.sort((a, b) => b.logNumber - a.logNumber)
+
+				requests.forEach(log => {
 					const listItem = $(`
 						<div class="log-entry">
 							<div class="log-controls">
@@ -49,6 +65,20 @@
 
 		// Initial fetch
 		fetchLogs()
+
+		// Back to index
+		$('#backToIndex').on('click', function() {
+			window.location = '/';
+		});
+
+		// Copy GUID URL to clipboard
+		$(document).on('click', '.copy-emoji', function(e) {
+			e.stopPropagation()
+			const copyText = $(this).data('copy')
+			navigator.clipboard.writeText(copyText).then(() => {
+				alert('Copied to clipboard!')
+			})
+		})
 
 		// Delete individual log
 		$(document).on('click', '.delete-log', function() {
@@ -114,6 +144,20 @@
 						alert('Error deleting all logs')
 					}
 				})
+			}
+		})
+
+		// Edit name
+		$('#urlName').on('click', async function() {
+			const newName = prompt('Enter a new name for this URL:')
+			if (newName) {
+				await $.ajax({
+					url: `/rename-url/${guid}`,
+					type: 'POST',
+					contentType: 'application/json',
+					data: JSON.stringify({ name: newName })
+				})
+				fetchLogs() // Update displayed name
 			}
 		})
 

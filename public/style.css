@@ -69,14 +69,8 @@ td:first-child {
 	text-align: center;
 }
 
-td:nth-child(2) {
-	width: 30px;
-	text-align: center;
-	padding: 0;
-}
-
 tr:hover {
-	background-color: #f1f1f1;
+	background-color: #e1e1e1;
 	cursor: pointer;
 }
 
@@ -149,4 +143,22 @@ tr:hover {
 	position: fixed;
 	top: 10px;
 	right: 167px;
+}
+
+#urlName {
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+#backToIndex {
+	margin-right: 2em;
+}
+
+#header h1 {
+	margin-bottom: 0.1em;
+}
+
+#guidContainer {
+	color: gray;
+	margin-bottom: 1em;
 }

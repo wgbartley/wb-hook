@@ -9,30 +9,26 @@
 </head>
 <body>
 	<h1>Webhook Manager</h1>
-	<button id="createBtn">Create New URL</button>
-	<div id="newUrlContainer"></div>
-	<h2>Available URLs</h2>
 	<table id="urlTable">
 		<thead>
 			<tr>
 				<th>&nbsp;</th>
-				<th>&nbsp;</th>
+				<th>Name</th>
 				<th>GUID</th>
 				<th>Created Time</th>
 				<th>Modified Time</th>
+				<th>First Request</th>
+				<th>Last Request</th>
+				<th>Request Count</th>
+				<th>&nbsp;</th>
 			</tr>
 		</thead>
 		<tbody id="urlList"></tbody>
 	</table>
-	<button id="viewBtn" disabled>View Selected URL</button>
-	<button id="deleteBtn" disabled>Delete Selected URL</button>
+	<br>
+	<button id="createBtn">Create New URL</button>
 
 	<script>
-		// Enable buttons if a URL is selected
-		function enableButtons() {
-			$('#viewBtn, #deleteBtn').prop('disabled', !$('input[name="url"]:checked').length)
-		}
-
 		// Fetch all GUIDs and populate the list
 		async function fetchUrls() {
 			const response = await $.get('/get-urls')
@@ -40,23 +36,23 @@
 			urlList.empty()
 
 			response.forEach(urlData => {
-				const { guid, created, modified } = urlData
-				const fullUrl = `${location.origin}/${guid}`
+				const { guid, name, created, modified, requestCount, firstRequestTime, lastRequestTime } = urlData
+				const fullUrl = `${location.origin}/view?guid=${guid}`
+				const formattedFirstRequestTime = firstRequestTime ? new Date(firstRequestTime).toLocaleString() : 'No requests'
+				const formattedLastRequestTime = lastRequestTime ? new Date(lastRequestTime).toLocaleString() : 'No requests'
 				const row = $(`
 					<tr>
-						<td><input type="radio" name="url" value="${guid}"></td>
 						<td><span class="copy-emoji" data-copy="${fullUrl}">📋</span></td>
-						<td>${guid}</td>
+						<td class="clickable name">${name}</td>
+						<td class="clickable guid">${guid}</td>
 						<td>${new Date(created).toLocaleString()}</td>
 						<td>${new Date(modified).toLocaleString()}</td>
+						<td>${formattedFirstRequestTime}</td>
+						<td>${formattedLastRequestTime}</td>
+						<td>${requestCount}</td>
+						<td><span class="delete-url" data-guid="${guid}">❌</span></td>
 					</tr>
 				`)
-
-				// Select radio button on row click
-				row.on('click', function() {
-					$(this).find('input[type="radio"]').prop('checked', true)
-					enableButtons()
-				})
 
 				// Copy URL to clipboard
 				row.find('.copy-emoji').on('click', function(e) {
@@ -67,55 +63,35 @@
 					})
 				})
 
+				// Navigate to the view page on clicking name or GUID
+				row.find('.clickable').on('click', function() {
+					window.location.href = fullUrl
+				})
+
+				// Delete URL with confirmation
+				row.find('.delete-url').on('click', function(e) {
+					e.stopPropagation()
+					const guidToDelete = $(this).data('guid')
+					const confirmed = confirm('Are you sure you want to delete this URL? This action cannot be undone.')
+					if (confirmed) {
+						$.ajax({
+							url: `/delete-url/${guidToDelete}`,
+							type: 'DELETE',
+							success: function() {
+								fetchUrls() // Refresh list after deletion
+							}
+						})
+					}
+				})
+
 				urlList.append(row)
 			})
-
-			enableButtons()
 		}
 
-		// Create new GUID
+		// Create new GUID and redirect to view page
 		$('#createBtn').on('click', async function() {
 			const data = await $.post('/create-url')
-			const fullUrl = `${location.origin}/${data.guid}`
-			$('#newUrlContainer').html(`
-				<label>New URL: <a href="${fullUrl}" target="_blank">${fullUrl}</a></label>
-				<span class="copy-emoji" id="copyNewUrl" data-copy="${fullUrl}">📋</span
-			`)
-			$('#copyNewUrl').on('click', function() {
-				const copyText = $(this).data('copy')
-				navigator.clipboard.writeText(copyText).then(() => {
-					alert('Copied to clipboard!')
-				})
-			})
-			fetchUrls() // Refresh list after creation
-		})
-
-		// View selected GUID
-		$('#viewBtn').on('click', function() {
-			const selectedUrl = $('input[name="url"]:checked').val()
-			if (selectedUrl) {
-				window.location.href = `/view?guid=${selectedUrl}`
-			} else {
-				alert('Please select a URL to view.')
-			}
-		})
-
-		// Delete selected GUID with confirmation
-		$('#deleteBtn').on('click', async function() {
-			const selectedUrl = $('input[name="url"]:checked').val()
-			if (selectedUrl) {
-				// Prompt for confirmation
-				const confirmed = confirm('Are you sure you want to delete this URL? This action cannot be undone.')
-				if (confirmed) {
-					await $.ajax({
-						url: `/delete-url/${selectedUrl}`,
-						type: 'DELETE'
-					})
-					fetchUrls() // Refresh list after deletion
-				}
-			} else {
-				alert('Please select a URL to delete.')
-			}
+			window.location.href = `/view?guid=${data.guid}`
 		})
 
 		// Initial fetch

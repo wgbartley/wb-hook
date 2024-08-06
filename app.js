@@ -26,43 +26,30 @@ function generateGuid() {
 	return uuidv4().toLowerCase()
 }
 
-// Write incoming request details to a file, with a sequence number
+// Write incoming request details to a file, under the "requests" key
 async function logRequest(guid, requestData) {
 	const filePath = path.join(DATA_DIR, `${guid}.json`)
-	let logData = []
-	let nextLogNumber = 1
 
-	// Check if the log file exists for the given GUID
-	try {
-		await fs.access(filePath)
-	} catch (err) {
-		if (err.code === 'ENOENT') {
-			// File does not exist, return 404
-			return { error: 'File not found', status: 404 }
-		} else {
-			console.error(`Error accessing log file for GUID ${guid}:`, err)
-			return { error: 'Error accessing log file', status: 500 }
-		}
-	}
-
-	// Proceed to read and log request data if the file exists
 	try {
 		const rawData = await fs.readFile(filePath, 'utf8')
-		logData = JSON.parse(rawData)
-		nextLogNumber = logData.length + 1
-	} catch (err) {
-		console.error(`Error reading log file for GUID ${guid}:`, err)
-		return { error: 'Error reading log file', status: 500 }
-	}
+		const data = JSON.parse(rawData)
 
-	requestData.logNumber = nextLogNumber
-	logData.push(requestData)
+		// Ensure the requests array exists
+		if (!Array.isArray(data.requests)) {
+			data.requests = []
+		}
 
-	try {
-		await fs.writeFile(filePath, JSON.stringify(logData, null, 2))
+		requestData.logNumber = data.requests.length + 1
+		data.requests.push(requestData)
+
+		await fs.writeFile(filePath, JSON.stringify(data, null, 2))
 	} catch (err) {
-		console.error(`Error writing log file for GUID ${guid}:`, err)
-		return { error: 'Error writing log file', status: 500 }
+		if (err.code === 'ENOENT') {
+			return { error: 'File not found', status: 404 }
+		} else {
+			console.error(`Error logging request for GUID ${guid}:`, err)
+			return { error: 'Error logging request', status: 500 }
+		}
 	}
 
 	// Notify SSE listeners
@@ -123,14 +110,16 @@ app.get('/view', (req, res) => {
 	res.sendFile(path.join(__dirname, 'public', 'view.html'))
 })
 
-// Create a new GUID
+// Create a new GUID with an optional name
 app.post('/create-url', async (req, res) => {
 	const guid = generateGuid()
+	const name = false // Initialize name as false
 	const filePath = path.join(DATA_DIR, `${guid}.json`)
 
-	// Create an empty file with an empty array
-	await fs.writeFile(filePath, JSON.stringify([]))
-	res.json({ guid })
+	// Create a file with the name and an empty requests array
+	const data = { name, requests: [] }
+	await fs.writeFile(filePath, JSON.stringify(data))
+	res.json({ guid, name })
 })
 
 // Delete data associated with a GUID
@@ -146,17 +135,26 @@ app.delete('/delete-url/:guid', async (req, res) => {
 	}
 })
 
-// Get all GUIDs with their creation and modification times
+// Get all GUIDs with their summary data
 app.get('/get-urls', async (req, res) => {
 	try {
 		const files = await fs.readdir(DATA_DIR)
 		const urls = await Promise.all(files.map(async file => {
 			const filePath = path.join(DATA_DIR, file)
 			const stats = await fs.stat(filePath)
+			const data = JSON.parse(await fs.readFile(filePath, 'utf8'))
+			const requestCount = data.requests ? data.requests.length : 0
+			const firstRequestTime = requestCount > 0 ? data.requests[0].timestamp : null
+			const lastRequestTime = requestCount > 0 ? data.requests[requestCount - 1].timestamp : null
+
 			return {
 				guid: path.basename(file, '.json'),
+				name: data.name || 'Untitled',
 				created: stats.birthtime,
-				modified: stats.mtime
+				modified: stats.mtime,
+				requestCount,
+				firstRequestTime,
+				lastRequestTime
 			}
 		}))
 		res.json(urls)
@@ -165,14 +163,14 @@ app.get('/get-urls', async (req, res) => {
 	}
 })
 
-// Get all logs for a given GUID
+// Get all logs and details for a given GUID
 app.get('/logs/:guid', async (req, res) => {
 	const { guid } = req.params
 	const filePath = path.join(DATA_DIR, `${guid}.json`)
 	try {
 		const rawData = await fs.readFile(filePath, 'utf8')
-		const logData = JSON.parse(rawData)
-		res.json(logData)
+		const data = JSON.parse(rawData)
+		res.json(data) // Return the entire data object, including name and requests
 	} catch (err) {
 		res.status(404).send('Logs not found')
 	}
@@ -184,10 +182,10 @@ app.delete('/logs/:guid/:logNumber', async (req, res) => {
 	const filePath = path.join(DATA_DIR, `${guid}.json`)
 	try {
 		const rawData = await fs.readFile(filePath, 'utf8')
-		let logData = JSON.parse(rawData)
-		logData = logData.filter(log => log.logNumber !== parseInt(logNumber))
+		let data = JSON.parse(rawData)
+		data.requests = data.requests.filter(log => log.logNumber !== parseInt(logNumber))
 
-		await fs.writeFile(filePath, JSON.stringify(logData, null, 2))
+		await fs.writeFile(filePath, JSON.stringify(data, null, 2))
 		res.sendStatus(200)
 	} catch (err) {
 		console.error(`Error deleting log #${logNumber} for GUID ${guid}:`, err)
@@ -202,19 +200,18 @@ app.delete('/logs/:guid', async (req, res) => {
 	const filePath = path.join(DATA_DIR, `${guid}.json`)
 
 	try {
+		const rawData = await fs.readFile(filePath, 'utf8')
+		let data = JSON.parse(rawData)
 		if (!logs) {
 			// Delete all logs
-			await fs.writeFile(filePath, JSON.stringify([]))
-			res.sendStatus(200)
+			data.requests = []
 		} else {
 			// Delete specified logs
-			const rawData = await fs.readFile(filePath, 'utf8')
-			let logData = JSON.parse(rawData)
-			logData = logData.filter(log => !logs.includes(log.logNumber))
-
-			await fs.writeFile(filePath, JSON.stringify(logData, null, 2))
-			res.sendStatus(200)
+			data.requests = data.requests.filter(log => !logs.includes(log.logNumber))
 		}
+
+		await fs.writeFile(filePath, JSON.stringify(data, null, 2))
+		res.sendStatus(200)
 	} catch (err) {
 		console.error(`Error deleting logs for GUID ${guid}:`, err)
 		res.status(500).send('Error deleting logs')
@@ -235,6 +232,25 @@ app.get('/logs-stream/:guid', (req, res) => {
 	req.on('close', () => {
 		sseClients[guid] = sseClients[guid].filter(client => client !== res)
 	})
+})
+
+// Rename a URL
+app.post('/rename-url/:guid', async (req, res) => {
+	const { guid } = req.params
+	const { name } = req.body
+	const filePath = path.join(DATA_DIR, `${guid}.json`)
+
+	try {
+		const rawData = await fs.readFile(filePath, 'utf8')
+		const data = JSON.parse(rawData)
+
+		data.name = name
+		await fs.writeFile(filePath, JSON.stringify(data, null, 2))
+		res.sendStatus(200)
+	} catch (err) {
+		console.error(`Error renaming URL ${guid}:`, err)
+		res.status(500).send('Error renaming URL')
+	}
 })
 
 // Log all requests under their respective GUIDs, including query strings and subdirectories
