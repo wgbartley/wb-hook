@@ -23,8 +23,9 @@
 
 	<script>
 		const guid = new URLSearchParams(window.location.search).get('guid')
-		const baseUrl = `${location.origin}/view?guid=${guid}`
+		const baseUrl = `${location.origin}/${guid}`
 		const logList = $('#logList')
+		let currentName = ''
 
 		// Function to fetch and render logs
 		function fetchLogs() {
@@ -33,6 +34,7 @@
 
 				// Set the name if available or use guid
 				const { name, requests } = data
+				currentName = name === false ? '' : name
 				if (name === false) {
 					$('#urlName').text(guid)
 					$('#guidContainer').hide() // Hide guidContainer if name is false
@@ -149,7 +151,7 @@
 
 		// Edit name
 		$('#urlName').on('click', async function() {
-			const newName = prompt('Enter a new name for this URL:')
+			const newName = prompt('Enter a new name for this URL:', currentName)
 			if (newName) {
 				await $.ajax({
 					url: `/rename-url/${guid}`,
