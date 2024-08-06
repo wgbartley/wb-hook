@@ -79,7 +79,7 @@
 			const fullUrl = `${location.origin}/${data.guid}`
 			$('#newUrlContainer').html(`
 				<label>New URL: <a href="${fullUrl}" target="_blank">${fullUrl}</a></label>
-				<span class="copy-emoji" id="copyNewUrl" data-copy="${fullUrl}">📋</span>
+				<span class="copy-emoji" id="copyNewUrl" data-copy="${fullUrl}">📋</span
 			`)
 			$('#copyNewUrl').on('click', function() {
 				const copyText = $(this).data('copy')
@@ -100,15 +100,19 @@
 			}
 		})
 
-		// Delete selected GUID
+		// Delete selected GUID with confirmation
 		$('#deleteBtn').on('click', async function() {
 			const selectedUrl = $('input[name="url"]:checked').val()
 			if (selectedUrl) {
-				await $.ajax({
-					url: `/delete-url/${selectedUrl}`,
-					type: 'DELETE'
-				})
-				fetchUrls() // Refresh list after deletion
+				// Prompt for confirmation
+				const confirmed = confirm('Are you sure you want to delete this URL? This action cannot be undone.')
+				if (confirmed) {
+					await $.ajax({
+						url: `/delete-url/${selectedUrl}`,
+						type: 'DELETE'
+					})
+					fetchUrls() // Refresh list after deletion
+				}
 			} else {
 				alert('Please select a URL to delete.')
 			}
