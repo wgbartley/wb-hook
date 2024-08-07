@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid')
 const morgan = require('morgan')
 const moment = require('moment')
 const bodyParser = require('body-parser') // Import body-parser for handling different content types
+const sqlite3 = require('sqlite3').verbose()
 
 // Global constants
 const DATA_DIR = path.join(__dirname, 'data')
@@ -26,39 +27,91 @@ function generateGuid() {
 	return uuidv4().toLowerCase()
 }
 
-// Write incoming request details to a file, under the "requests" key
+// Initialize SQLite database
+async function initDb(guid) {
+	const dbPath = path.join(DATA_DIR, `${guid}.db`)
+	const db = new sqlite3.Database(dbPath)
+
+	return new Promise((resolve, reject) => {
+		db.serialize(() => {
+			db.run(`CREATE TABLE IF NOT EXISTS metadata (name TEXT)`, err => {
+				if (err) return reject(err)
+			})
+
+			db.run(
+				`CREATE TABLE IF NOT EXISTS requests (
+					logNumber INTEGER PRIMARY KEY AUTOINCREMENT,
+					timestamp TEXT,
+					method TEXT,
+					url TEXT,
+					headers TEXT,
+					body TEXT
+				)`,
+				err => {
+					if (err) return reject(err)
+					db.close()
+					resolve(dbPath)
+				}
+			)
+		})
+	})
+}
+
+// Write incoming request details to a SQLite database
 async function logRequest(guid, requestData) {
-	const filePath = path.join(DATA_DIR, `${guid}.json`)
+	const dbPath = path.join(DATA_DIR, `${guid}.db`)
 
 	try {
-		const rawData = await fs.readFile(filePath, 'utf8')
-		const data = JSON.parse(rawData)
-
-		// Ensure the requests array exists
-		if (!Array.isArray(data.requests)) {
-			data.requests = []
-		}
-
-		requestData.logNumber = data.requests.length + 1
-		data.requests.push(requestData)
-
-		await fs.writeFile(filePath, JSON.stringify(data, null, 2))
+		await fs.access(dbPath)
 	} catch (err) {
-		if (err.code === 'ENOENT') {
-			return { error: 'File not found', status: 404 }
-		} else {
-			console.error(`Error logging request for GUID ${guid}:`, err)
-			return { error: 'Error logging request', status: 500 }
-		}
+		return { status: 404, error: 'Not found' }
 	}
 
-	// Notify SSE listeners
+	await initDb(guid) // Ensure the database and tables are initialized
+
+	const db = new sqlite3.Database(dbPath)
+
+	return new Promise((resolve, reject) => {
+		const stmt = db.prepare(
+			`INSERT INTO requests (timestamp, method, url, headers, body) VALUES (?, ?, ?, ?, ?)`
+		)
+		stmt.run(
+			requestData.timestamp,
+			requestData.method,
+			requestData.url,
+			JSON.stringify(requestData.headers),
+			JSON.stringify(requestData.body),
+			function(err) {
+				if (err) {
+					stmt.finalize()
+					db.close()
+					return resolve({ status: 500, error: err.message })
+				}
+
+				const logNumber = this.lastID
+
+				stmt.finalize()
+				db.close()
+
+				// Add logNumber to requestData
+				requestData.logNumber = logNumber
+
+				// Push update to clients
+				pushUpdateToClients(guid, requestData)
+
+				resolve({ status: 200 })
+			}
+		)
+	})
+}
+
+// Function to push updates to clients
+function pushUpdateToClients(guid, log) {
 	if (sseClients[guid]) {
-		const message = JSON.stringify(requestData)
-		sseClients[guid].forEach(res => res.write(`data: ${message}\n\n`))
+		sseClients[guid].forEach(client => {
+			client.write(`data: ${JSON.stringify(log)}\n\n`)
+		})
 	}
-
-	return { status: 200 }
 }
 
 // Set up the Express app and routes
@@ -113,21 +166,27 @@ app.get('/view', (req, res) => {
 // Create a new GUID with an optional name
 app.post('/create-url', async (req, res) => {
 	const guid = generateGuid()
-	const name = false // Initialize name as false
-	const filePath = path.join(DATA_DIR, `${guid}.json`)
+	const { name = 'Untitled' } = req.body
+	const dbPath = await initDb(guid)
 
-	// Create a file with the name and an empty requests array
-	const data = { name, requests: [] }
-	await fs.writeFile(filePath, JSON.stringify(data))
-	res.json({ guid, name })
+	const db = new sqlite3.Database(dbPath)
+	return new Promise((resolve, reject) => {
+		db.run(`INSERT INTO metadata (name) VALUES (?)`, name, err => {
+			if (err) return reject(err)
+			res.json({ guid, name })
+			db.close()
+			resolve()
+		})
+	})
 })
 
 // Delete data associated with a GUID
 app.delete('/delete-url/:guid', async (req, res) => {
 	const { guid } = req.params
-	const filePath = path.join(DATA_DIR, `${guid}.json`)
+	const dbPath = path.join(DATA_DIR, `${guid}.db`)
 	try {
-		await fs.unlink(filePath)
+		await fs.access(dbPath)
+		await fs.unlink(dbPath)
 		delete sseClients[guid] // Clear SSE clients
 		res.sendStatus(200)
 	} catch (err) {
@@ -135,29 +194,47 @@ app.delete('/delete-url/:guid', async (req, res) => {
 	}
 })
 
-// Get all GUIDs with their summary data
+// Get all GUIDs with their creation and modification times
 app.get('/get-urls', async (req, res) => {
 	try {
 		const files = await fs.readdir(DATA_DIR)
 		const urls = await Promise.all(files.map(async file => {
-			const filePath = path.join(DATA_DIR, file)
-			const stats = await fs.stat(filePath)
-			const data = JSON.parse(await fs.readFile(filePath, 'utf8'))
-			const requestCount = data.requests ? data.requests.length : 0
-			const firstRequestTime = requestCount > 0 ? data.requests[0].timestamp : null
-			const lastRequestTime = requestCount > 0 ? data.requests[requestCount - 1].timestamp : null
+			if (!file.endsWith('.db')) return null
 
-			return {
-				guid: path.basename(file, '.json'),
-				name: data.name || 'Untitled',
-				created: stats.birthtime,
-				modified: stats.mtime,
-				requestCount,
-				firstRequestTime,
-				lastRequestTime
-			}
+			const dbPath = path.join(DATA_DIR, file)
+			const db = new sqlite3.Database(dbPath)
+
+			return new Promise((resolve, reject) => {
+				db.serialize(() => {
+					db.get(`SELECT name FROM metadata`, (err, row) => {
+						if (err) return reject(err)
+
+						const name = row ? row.name : 'Untitled'
+						const guid = path.basename(file, '.db')
+
+						db.get(`SELECT MIN(timestamp) as firstRequestTime, MAX(timestamp) as lastRequestTime, COUNT(*) as requestCount FROM requests`, (err, row) => {
+							if (err) return reject(err)
+
+							const { firstRequestTime, lastRequestTime, requestCount } = row
+							fs.stat(dbPath).then(stats => {
+								db.close()
+								resolve({
+									guid,
+									name,
+									created: stats.birthtime,
+									modified: stats.mtime,
+									requestCount,
+									firstRequestTime,
+									lastRequestTime
+								})
+							})
+						})
+					})
+				})
+			})
 		}))
-		res.json(urls)
+
+		res.json(urls.filter(Boolean))
 	} catch (err) {
 		res.status(500).send('Error retrieving URLs')
 	}
@@ -166,56 +243,113 @@ app.get('/get-urls', async (req, res) => {
 // Get all logs and details for a given GUID
 app.get('/logs/:guid', async (req, res) => {
 	const { guid } = req.params
-	const filePath = path.join(DATA_DIR, `${guid}.json`)
+	const dbPath = path.join(DATA_DIR, `${guid}.db`)
 	try {
-		const rawData = await fs.readFile(filePath, 'utf8')
-		const data = JSON.parse(rawData)
-		res.json(data) // Return the entire data object, including name and requests
+		await fs.access(dbPath)
 	} catch (err) {
-		res.status(404).send('Logs not found')
+		return res.sendStatus(404)
 	}
+	await initDb(guid) // Ensure the database and tables are initialized
+
+	const db = new sqlite3.Database(dbPath)
+
+	return new Promise((resolve, reject) => {
+		db.serialize(() => {
+			db.get(`SELECT name FROM metadata`, (err, row) => {
+				if (err) return reject(err)
+
+				const name = row ? row.name : 'Untitled'
+
+				db.all(`SELECT * FROM requests ORDER BY logNumber DESC`, (err, rows) => {
+					if (err) return reject(err)
+
+					const requests = rows.map(row => ({
+						logNumber: row.logNumber,
+						timestamp: row.timestamp,
+						method: row.method,
+						url: row.url,
+						headers: JSON.parse(row.headers),
+						body: JSON.parse(row.body)
+					}))
+
+					res.json({ name, requests })
+					db.close()
+					resolve()
+				})
+			})
+		})
+	})
 })
 
 // Delete a specific log by log number
 app.delete('/logs/:guid/:logNumber', async (req, res) => {
 	const { guid, logNumber } = req.params
-	const filePath = path.join(DATA_DIR, `${guid}.json`)
+	const dbPath = path.join(DATA_DIR, `${guid}.db`)
 	try {
-		const rawData = await fs.readFile(filePath, 'utf8')
-		let data = JSON.parse(rawData)
-		data.requests = data.requests.filter(log => log.logNumber !== parseInt(logNumber))
-
-		await fs.writeFile(filePath, JSON.stringify(data, null, 2))
-		res.sendStatus(200)
+		await fs.access(dbPath)
 	} catch (err) {
-		console.error(`Error deleting log #${logNumber} for GUID ${guid}:`, err)
-		res.status(500).send('Error deleting log')
+		return res.sendStatus(404)
 	}
+	await initDb(guid) // Ensure the database and tables are initialized
+
+	const db = new sqlite3.Database(dbPath)
+
+	return new Promise((resolve, reject) => {
+		db.run(`DELETE FROM requests WHERE logNumber = ?`, logNumber, err => {
+			if (err) {
+				console.error(`Error deleting log #${logNumber} for GUID ${guid}:`, err)
+				return reject(err)
+			}
+
+			res.sendStatus(200)
+			db.close()
+			resolve()
+		})
+	})
 })
 
 // Delete multiple or all logs
 app.delete('/logs/:guid', async (req, res) => {
 	const { guid } = req.params
 	const { logs } = req.body
-	const filePath = path.join(DATA_DIR, `${guid}.json`)
-
+	const dbPath = path.join(DATA_DIR, `${guid}.db`)
 	try {
-		const rawData = await fs.readFile(filePath, 'utf8')
-		let data = JSON.parse(rawData)
+		await fs.access(dbPath)
+	} catch (err) {
+		return res.sendStatus(404)
+	}
+	await initDb(guid) // Ensure the database and tables are initialized
+
+	const db = new sqlite3.Database(dbPath)
+
+	return new Promise((resolve, reject) => {
 		if (!logs) {
 			// Delete all logs
-			data.requests = []
+			db.run(`DELETE FROM requests`, err => {
+				if (err) {
+					console.error(`Error deleting logs for GUID ${guid}:`, err)
+					return reject(err)
+				}
+
+				res.sendStatus(200)
+				db.close()
+				resolve()
+			})
 		} else {
 			// Delete specified logs
-			data.requests = data.requests.filter(log => !logs.includes(log.logNumber))
-		}
+			const placeholders = logs.map(() => '?').join(',')
+			db.run(`DELETE FROM requests WHERE logNumber IN (${placeholders})`, logs, err => {
+				if (err) {
+					console.error(`Error deleting logs for GUID ${guid}:`, err)
+					return reject(err)
+				}
 
-		await fs.writeFile(filePath, JSON.stringify(data, null, 2))
-		res.sendStatus(200)
-	} catch (err) {
-		console.error(`Error deleting logs for GUID ${guid}:`, err)
-		res.status(500).send('Error deleting logs')
-	}
+				res.sendStatus(200)
+				db.close()
+				resolve()
+			})
+		}
+	})
 })
 
 // Serve logs as SSE for new logs
@@ -228,8 +362,14 @@ app.get('/logs-stream/:guid', (req, res) => {
 	if (!sseClients[guid]) sseClients[guid] = []
 	sseClients[guid].push(res)
 
-	// Remove the response object when the client closes the connection
+	// Send a comment to keep the connection alive every 15 seconds
+	const keepAlive = setInterval(() => {
+		res.write(': keep-alive\n\n')
+	}, 15000)
+
+	// Remove the response object and clear interval when the client closes the connection
 	req.on('close', () => {
+		clearInterval(keepAlive)
 		sseClients[guid] = sseClients[guid].filter(client => client !== res)
 	})
 })
@@ -238,19 +378,28 @@ app.get('/logs-stream/:guid', (req, res) => {
 app.post('/rename-url/:guid', async (req, res) => {
 	const { guid } = req.params
 	const { name } = req.body
-	const filePath = path.join(DATA_DIR, `${guid}.json`)
-
+	const dbPath = path.join(DATA_DIR, `${guid}.db`)
 	try {
-		const rawData = await fs.readFile(filePath, 'utf8')
-		const data = JSON.parse(rawData)
-
-		data.name = name
-		await fs.writeFile(filePath, JSON.stringify(data, null, 2))
-		res.sendStatus(200)
+		await fs.access(dbPath)
 	} catch (err) {
-		console.error(`Error renaming URL ${guid}:`, err)
-		res.status(500).send('Error renaming URL')
+		return res.sendStatus(404)
 	}
+	await initDb(guid) // Ensure the database and tables are initialized
+
+	const db = new sqlite3.Database(dbPath)
+
+	return new Promise((resolve, reject) => {
+		db.run(`UPDATE metadata SET name = ?`, name, err => {
+			if (err) {
+				console.error(`Error renaming URL ${guid}:`, err)
+				return reject(err)
+			}
+
+			res.sendStatus(200)
+			db.close()
+			resolve()
+		})
+	})
 })
 
 // Log all requests under their respective GUIDs, including query strings and subdirectories
